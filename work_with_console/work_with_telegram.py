@@ -32,6 +32,9 @@ from dags.BaseAnalyse import RunFileAnalyse, NormalizeAndCreateMailPassFile
 from set_parameters import (api_id, api_hash,
                             mongo_user_name, mongo_password, my_mongo_url, my_collection_name,
                             my_database_name, work_collection_name, work_database_name, ip_addr)
+from telethon.errors import SessionPasswordNeededError
+from urllib.parse import urlparse
+from telethon.tl.types import MessageEntityUrl, MessageEntityTextUrl
 
 
 def MyMongoCollection():
@@ -193,7 +196,8 @@ def KByteExtractFromSize(size):
 
 async def ConnectToTelegram():
     print("\nПодключение к клиенту Telegram...")
-    client = TelegramClient("session_name", int(api_id), api_hash)
+    session_path = os.path.join(session_telegram, "session_name")
+    client = TelegramClient(session_path, int(api_id), api_hash)
     while True:  # Бесконечный цикл для поддержания подключения
         try:
             if not client.is_connected():
@@ -203,16 +207,35 @@ async def ConnectToTelegram():
                 return client
             else:
                 print("Необходимо авторизоваться. Проверьте свои учетные данные.")
-                return None
+                return client
 
         except Exception as e:
             print(f"Произошла ошибка: {e}. Переподключение через 5 секунд...")
             await asyncio.sleep(5)
 
 
+async def AuthorizeTelegram(client):
+    phone = input("Введите номер телефона (в формате +71234567890): ").strip()
+    await client.send_code_request(phone)
+    code = input("Введите код из Telegram: ").strip()
+
+    try:
+        await client.sign_in(phone, code)
+    except SessionPasswordNeededError:
+        password = input("Введите пароль от аккаунта Telegram (2FA): ").strip()
+        await client.sign_in(password=password)
+
+    if await client.is_user_authorized():
+        print("✅ Авторизация прошла успешно.")
+        return True
+    else:
+        print("❌ Авторизация не удалась.")
+        return False
+
+
 async def Write_Channel_name(client, obj):
     cur = 0
-    dialogs = await client.get_dialogs()  # все каналы
+    dialogs = await get_all_dialogs(client)
     print("\nДоступные каналы:")
     for dialog in dialogs:
         print(dialog.entity.username)
@@ -232,7 +255,7 @@ async def Write_Channel_name(client, obj):
 
 async def CheckConnectToChanel(client, channel_id):
     try:
-        dialogs = await client.get_dialogs()
+        dialogs = await get_all_dialogs(client)
         for dialog in dialogs:
             if dialog.entity.id == channel_id:
                 unread = dialog.unread_count
@@ -256,7 +279,7 @@ async def ConnectionToChannel(client):
     massive_id = []
     massive_unread = []
     massive_names = []
-    dialogs = await client.get_dialogs()  # все каналы
+    dialogs = await get_all_dialogs(client)
     for dialog in dialogs:
         massive_names.append(dialog.name)
     max_len_name_size = len(max(massive_names, key=len))
@@ -275,7 +298,6 @@ async def ConnectionToChannel(client):
             channel_link = f"https://t.me/{name}"
         unread = dialog.unread_count
         if channel_id == 2117186516:
-
             from folders_for_analitics import analitic_folders
             f = open(rf"{analitic_folders.get('work_folder')}\take.txt", "r")
             cur = f.readline()
@@ -300,7 +322,7 @@ async def ConnectionToChannel(client):
 
 
 async def Count_Unread_Messages(client, channel_name):
-    dialogs = await client.get_dialogs()  # все каналы
+    dialogs = await get_all_dialogs(client)
     for dialog in dialogs:
         if dialog.entity.username == channel_name:
             return dialog.unread_count
@@ -426,7 +448,6 @@ def NumberOfCollections():
     return number_of_collection
 
 
-
 def CheckDuplicateNames(collection_names):
     collection_name = InputName()
     if collection_name in collection_names:
@@ -446,6 +467,7 @@ def RemoveDupInClusters(clusters):
                 seen.add(f)
         clusters[cluster_id] = unique_files
     return clusters
+
 
 def AI_Analyse_For_Collection(mass_names, mass_sizes):
     print("\nОпределяется оптимальное число коллекций...")
@@ -546,10 +568,10 @@ def DopClusterFilenames(other_files, num_clusters):
 
 def find_optimal_num_clusters(file_names, mass_sizes):
     counter = 0
-    image_extensions = (".jpeg", ".png", ".jpg", ".bmp", ".dib", ".rle", ".pdf", ".gif", ".tiff")
+    image_extensions = (".jpeg", ".png", ".jpg", ".bmp", ".dib", ".rle", ".pdf", ".gif", ".tiff", ".tgs")
     scripts = (".html", ".css", ".php", ".py", ".asp", ".xml", ".htm", ".exe")
     audios = (".mp3", ".wav", ".ogg", ".flac", ".wma")
-    video_extensions = (".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv")
+    video_extensions = (".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".webp")
     small_files = [file for size, file in zip(mass_sizes, file_names) if KByteExtractFromSize(size) <= 50]
     has_images = any(file_name.lower().endswith(image_extensions) for file_name in file_names)
     has_videos = any(file_name.lower().endswith(video_extensions) for file_name in file_names)
@@ -585,7 +607,7 @@ def find_optimal_num_clusters(file_names, mass_sizes):
 
     max_clusters = min(unique_vector_count - 1, len(other_files))
     warnings.filterwarnings("ignore")
-    if max_clusters == 1:
+    if max_clusters == 1 or len(set(other_files_cleaned)) == 1:
         optimal_num_clusters = 1
     else:
         for i in range(2, max_clusters + 1):
@@ -609,10 +631,10 @@ def cluster_file_names(file_names, num_clusters, mass_sizes):
     if num_clusters == 1:
         clusters = {0: file_names}
         return clusters
-    image_extensions = (".jpeg", ".png", ".jpg", ".bmp", ".dib", ".rle", ".pdf", ".gif", ".tiff")
+    image_extensions = (".jpeg", ".png", ".jpg", ".bmp", ".dib", ".rle", ".pdf", ".gif", ".tiff", ".tgs")
     scripts_extensions = (".html", ".css", ".php", ".py", ".asp", ".xml", ".htm", ".exe")
     audios_extensions = (".mp3", ".wav", ".ogg", ".flac", ".wma")
-    video_extensions = (".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm")
+    video_extensions = (".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".webp")
     small_files = [
         file
         for size, file in zip(mass_sizes, file_names)
@@ -741,7 +763,7 @@ def DeleteClusters(clusters):
 
 
 def DisplayClusters(clusters):
-    clusters_list = [(cluster_id, file_names) for cluster_id, file_names in clusters.items()]
+    clusters_list = [(cluster_id, file_names) for cluster_id, file_names in clusters.items() if file_names]
     clusters_list_sorted = sorted(clusters_list, key=lambda x: x[1][0])
     sorted_clusters = {cluster_id: file_names for cluster_id, file_names in clusters_list_sorted}
     print("\nРезультаты группировки файлов: ")
@@ -1129,7 +1151,7 @@ async def StartDownload(
         filepath = os.path.join(path_to_file, filename)
     if flag_of_collection:
         infofilepath = os.path.join(path_to_info, "info_file")
-        if marker_of_download is False:
+        if marker_of_download is False or os.path.exists(filepath):
             try:
                 downloaded_files_paths = folders.get("files_path")
                 files = list(filter(os.path.isfile, glob.glob(f"{downloaded_files_paths}/*") + glob.glob(
@@ -1144,34 +1166,37 @@ async def StartDownload(
         infofilepath = os.path.join(path_to_info, filename)
 
     if marker_of_download is True:
-        global last
-        last = 0
-
-        def progress_callback(current, total):
+        if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+            print(f"\nФайл {filename} уже существует, пропускаю загрузку из Telegram.")
+        else:
             global last
-            total_mb = total / (1024 * 1024)
-            current_mb = current / (1024 * 1024)
-            if 10 < total_mb <= 100:
-                if round(current_mb, 2) - last >= 10:
-                    print(f"Загружено {current_mb:.2f} Мб из {total_mb:.2f} Мб")
-                    last = round(current_mb, 2)
-            elif 100 < total_mb <= 500:
-                if round(current_mb, 2) - last >= 50:
-                    print(f"Загружено {current_mb:.2f} Мб из {total_mb:.2f} Мб")
-                    last = round(current_mb, 2)
-            elif 500 < total_mb:
-                if round(current_mb, 2) - last >= 100:
-                    print(f"Загружено {current_mb:.2f} Мб из {total_mb:.2f} Мб")
-                    last = round(current_mb, 2)
-            else:
-                print(f"Загружено {current_mb:.2f} Мб из {total_mb:.2f} Мб")
+            last = 0
 
-        async for message in client.iter_messages(channel_id, limit=num):
-            if message.id == massive_id[i]:
-                # добавить время ожидания загрузки
-                print(f"\nЗагрузка файла {filename} \t {file_size}...")
-                await download_file(client, message, filepath, progress_callback=progress_callback)
-                # await client.download_media(message, filepath, progress_callback=progress_callback)
+            def progress_callback(current, total):
+                global last
+                total_mb = total / (1024 * 1024)
+                current_mb = current / (1024 * 1024)
+                if 10 < total_mb <= 100:
+                    if round(current_mb, 2) - last >= 10:
+                        print(f"Загружено {current_mb:.2f} Мб из {total_mb:.2f} Мб")
+                        last = round(current_mb, 2)
+                elif 100 < total_mb <= 500:
+                    if round(current_mb, 2) - last >= 50:
+                        print(f"Загружено {current_mb:.2f} Мб из {total_mb:.2f} Мб")
+                        last = round(current_mb, 2)
+                elif 500 < total_mb:
+                    if round(current_mb, 2) - last >= 100:
+                        print(f"Загружено {current_mb:.2f} Мб из {total_mb:.2f} Мб")
+                        last = round(current_mb, 2)
+                else:
+                    print(f"Загружено {current_mb:.2f} Мб из {total_mb:.2f} Мб")
+
+            async for message in client.iter_messages(channel_id, limit=num):
+                if message.id == massive_id[i]:
+                    # добавить время ожидания загрузки
+                    print(f"\nЗагрузка файла {filename} \t {file_size}...")
+                    await download_file(client, message, filepath, progress_callback=progress_callback)
+                    # await client.download_media(message, filepath, progress_callback=progress_callback)
     else:
         print(f"\nЗагрузка метаинформации для файла {filename} \t {file_size}...")
         await asyncio.sleep(1)
@@ -1717,10 +1742,11 @@ def PreCleanFilename(filename):
     filename = os.path.splitext(filename)[0]
     filename = re.sub(r'[^\wа-яА-ЯёЁ]+', ' ', filename)
     filename = re.sub(r'\s+', ' ', filename).strip().lower()
+    filename = re.sub(r'\d+$', '', filename, flags=re.IGNORECASE)
     return filename
 
 
-def AreSimilar(file1, file2, threshold=0.97):
+def AreSimilar(file1, file2, threshold=0.87):
     seq = SequenceMatcher(None, file1, file2)
     return seq.ratio() >= threshold
 
@@ -1799,14 +1825,88 @@ def FindMessageIdForFile(file_names, mass_sizes_for_check, mass_id):
     return new_mass_id
 
 
+async def get_all_dialogs(client):
+    dialogs = []
+    async for dialog in client.iter_dialogs():
+        dialogs.append(dialog)
+    return dialogs
+
+
+async def is_valid_link(url: str) -> bool:
+    DB_EXTENSIONS = (
+        # Архивы
+        ".zip", ".rar", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".zst",
+        # Текстовые форматы
+        ".txt", ".csv", ".tsv", ".json", ".ndjson", ".xml", ".yaml", ".yml",
+        # SQL / дампы
+        ".sql", ".dump", ".bak", ".backup",
+        # Таблицы
+        ".xlsx", ".xls", ".xlsb", ".ods",
+        # Файлы БД
+        ".db", ".sqlite", ".sqlite3", ".mdb", ".accdb", ".parquet", ".feather"
+    )
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Сначала пробуем HEAD
+            try:
+                resp = await session.head(url, allow_redirects=True, timeout=10)
+            except Exception:
+                # Если HEAD не поддерживается – пробуем GET только с заголовками
+                resp = await session.get(url, allow_redirects=True, timeout=10)
+            async with resp:
+                if resp.status != 200:
+                    return False
+
+                content_type = resp.headers.get("Content-Type", "").lower()
+                content_length = resp.headers.get("Content-Length")
+
+                # если это HTML — точно не база
+                if "text/html" in content_type:
+                    return False
+
+                # если сервер явно сказал, что размер = 0
+                if content_length is not None and int(content_length) == 0:
+                    return False
+
+                # проверяем расширение в URL
+                path = urlparse(url).path
+                _, ext = os.path.splitext(path)
+                if ext.lower() in DB_EXTENSIONS:
+                    return True
+
+                # иногда расширения нет, но content-type намекает
+                if any(x in content_type for x in ["zip", "rar", "7z", "excel", "spreadsheet", "csv", "sql"]):
+                    return True
+
+                return False
+    except Exception as e:
+        logging.error(f"Ошибка при проверке ссылки {url}: {e}")
+        return False
+
+
+async def download_from_link(url, filepath):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status == 200:
+                with open(filepath, "wb") as f:
+                    while True:
+                        chunk = await resp.content.read(1024 * 1024)  # читаем кусками по 1 МБ
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                return True
+    return False
+
+
 async def DownloadFiles(client, channel, num, my_collection, work_collection, marker_of_download):
     meta_info = "-"
     messages_list = []
     count = 0
+    count_mes = 0
     channel_id = channel[1]
     channel_name = None
 
-    dialogs = await client.get_dialogs()  # все каналы
+    dialogs = await get_all_dialogs(client)
 
     for dialog in dialogs:
         if channel_id == dialog.entity.id:
@@ -1935,7 +2035,120 @@ async def DownloadFiles(client, channel, num, my_collection, work_collection, ma
             except Exception as e:
                 logging.error("An error occurred: %s", e)
                 continue
+        else:
+            if message.text:
+                try:
+                    urls = []
+                    for entity in message.entities or []:
+                        if isinstance(entity, MessageEntityUrl):
+                            # ссылка из текста (полная строка в сообщении)
+                            url = message.text[entity.offset: entity.offset + entity.length]
+                            if url.startswith(("http://", "https://")):
+                                urls.append(url)
+                        elif isinstance(entity, MessageEntityTextUrl):
+                            # скрытая ссылка (под анкором)
+                            if entity.url:
+                                urls.append(entity.url)
+                    BLOCKED_DOMAINS = ["t.me/fulldbbot", "t.me/fulldbbot/subscription", "t.me/"]
+                    urls = [u for u in urls if not any(block in u for block in BLOCKED_DOMAINS)]
+                    for url in urls:
+                        if await is_valid_link(url):
+                            filename = os.path.basename(urlparse(url).path)
+                            filepath = os.path.join(folders.get("files_path"), filename)
+                            # Скачиваем
+                            print(f"Найдена ссылка на БД: {url}, скачиваю...")
+                            success = await download_from_link(url, filepath)
+                            if not success:
+                                print(f"⚠️ Файл по ссылке {url} не удалось скачать.")
+                                continue
+                            if success:
+                                print(f"Файл {filename} успешно скачан по ссылке!")
 
+                                # Добавляем файл в массивы как будто он был вложением
+                                mass_names.append(filename)
+                                mass_id.append(message.id)
+                                mass_time.append(message.date)
+                                try:
+                                    mass_links.append(
+                                        await Link_to_File(
+                                            client, message.id, channel_title, channel_id
+                                        )
+                                    )
+                                except Exception as e:
+                                    logging.error("An error occurred: %s", e)
+                                    mass_links.append("Ссылка на сообщение не доступна!")
+                                try:
+                                    mass_sizes_for_check.append(os.path.getsize(filepath))
+                                    if Size(os.path.getsize(filepath)) is not None:
+                                        mass_sizes.append(Size(os.path.getsize(filepath)))
+                                    else:
+                                        mass_sizes.append("-")
+                                except Exception:
+                                    mass_sizes.append("-")
+                                    mass_sizes_for_check.append(0)
+
+                                tmp_info = ''
+                                try:
+                                    meta_info = await GetMetaInfoInInternet(filename)
+                                except Exception as e:
+                                    print(e)
+                                    meta_info = '-'
+                                if meta_info != '-':
+                                    tmp_info += meta_info
+                                try:
+                                    if message.text:
+                                        tmp_info = tmp_info + '\n' + message.text
+                                        mass_info.append(tmp_info)
+                                    else:
+                                        info_parts = []
+                                        if prev_message:
+                                            try:
+                                                if prev_message.text:
+                                                    info_parts.append(
+                                                        f"Информация для предыдущего сообщения: {prev_message.text}")
+                                            except Exception as e:
+                                                logging.error("An error occurred: %s", e)
+                                        if next_message:
+                                            try:
+                                                if next_message.text:
+                                                    info_parts.append(
+                                                        f"\nИнформация для последующего сообщения: {next_message.text}")
+                                            except Exception as e:
+                                                logging.error("An error occurred: %s", e)
+
+                                        if info_parts:
+                                            tmp_info_parts = "\n".join(info_parts)
+                                            tmp_info = tmp_info + '\n' + tmp_info_parts
+                                            mass_info.append(tmp_info)
+                                        else:
+                                            mass_info.append(tmp_info if tmp_info else '-')
+                                except Exception as e:
+                                    logging.error("An error occurred: %s", e)
+                                    mass_info.append(tmp_info if tmp_info else '-')
+                                if marker_of_download is False:
+                                    print("Сканировано файлов: ", count + 1)
+                                else:
+                                    print(
+                                        count + 1,
+                                        "\t" * 2,
+                                        filename,
+                                        "\t" * 2,
+                                        Size(os.path.getsize(filepath)),
+                                        "\nИнформация из текста сообщения: \t",
+                                        message.text,
+                                        "\nИнформация из интернета: ",
+                                        meta_info,
+                                    )
+                                count += 1
+                                if count % 10 == 0:
+                                    await CheckConnect(client)
+                    print("Сканировано сообщений: ", count_mes + 1)
+                    count_mes += 1
+                    if count_mes % 10 == 0:
+                        await CheckConnect(client)
+                except Exception as e:
+                    logging.error("An error occurred: %s", e)
+                    continue
     if not mass_names:
         print("Файлов для загрузки нет!")
         return
@@ -2208,18 +2421,28 @@ async def TelegramWorkMenu(client, channel):
         time.sleep(3)
         return await TelegramWorkMenu(client, channel)
     elif s == "7":
-        dialogs = await client.get_dialogs()
+        dialogs = await get_all_dialogs(client)
         print("Начинается потоковая выгрузка всей информации для скачанных заранее файлов...")
         my_collection = ConnectToMongo(collection_parameters=MyMongoCollection())
         work_collection = ConnectToMongo(collection_parameters=TmpMongoCollection())
         marker_of_download = False
+        bf_flag = False
         for dialog in dialogs:
             channel_id = dialog.entity.id
             channel_name = dialog.name
+            if channel_name == "BF Files":
+                bf_flag = True
             tmp_channel = [channel_name, channel_id]
             print("Успешное подключение к серверу MongoDB!")
             print(f"\nПроцесс загрузки метаинформации для {channel_name}...")
-            await DownloadFiles(client, tmp_channel, 400, my_collection, work_collection, marker_of_download)
+            await DownloadFiles(client, tmp_channel, 1500, my_collection, work_collection, marker_of_download)
+            print(f"\nПроцесс загрузки для {channel_name} завершен.")
+        if not bf_flag:
+            bf_channel = await client.get_entity("t.me/BF_files")
+            channel_name = bf_channel.title
+            tmp_channel = [channel_name, bf_channel.id]
+            print(f"\nПроцесс загрузки метаинформации для {channel_name}...")
+            await DownloadFiles(client, tmp_channel, 1500, my_collection, work_collection, marker_of_download)
             print(f"\nПроцесс загрузки для {channel_name} завершен.")
         return await TelegramWorkMenu(client, channel)
     elif s == "0":
